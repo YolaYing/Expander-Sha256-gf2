@@ -252,23 +252,48 @@ type keccak256Circuit struct {
 }
 
 func computeKeccak(api frontend.API, P []frontend.Variable) []frontend.Variable {
+	// ----------------------------- Initialize Keccak State: 5×5×64 bits = 1600 bits -----------------------------
+	// ss is the Keccak state A[x][y], represented as a 1D array of 25 lanes.
+	// Each lane is 64 bits → total 1600 bits
 	ss := make([][]frontend.Variable, 25)
+	// Initially all set to zero → corresponds to state := zero_state() in Keccak spec.
 	for i := 0; i < 25; i++ {
 		ss[i] = make([]frontend.Variable, 64)
 		for j := 0; j < 64; j++ {
 			ss[i][j] = 0
 		}
 	}
+
+	// ------------------------------------- Copy input P and prepare for padding ----------------------------------
+	// P is the 64-byte (512-bit) message input, already bit-decomposed.
+	// newP is a flat array to which padding will be appended.
+	// It will become the padded message block.
 	newP := make([]frontend.Variable, 64*8)
 	copy(newP, P)
-	appendData := make([]byte, 136-64)
-	appendData[0] = 1
-	appendData[135-64] = 0x80
+
+	// -------------------------------- Apply pad10*1 padding to reach 136 bytes (1088 bits) ------------------------
+	// We need to pad from 64 bytes → 136 bytes (rate = 1088 bits = 136 bytes)
+	// pad10*1 means: start with 1, add 0s, end with 1, encoded as:
+	// - First byte = 0b00000001
+	// - Last byte = 0b10000000
+	appendData := make([]byte, 136-64) // 72 bytes of padding
+	appendData[0] = 1  // binary: 00000001
+	appendData[135-64] = 0x80 // binary: 10000000, appendData[71] = 0x80 = 10000000
+	// it appears in the MSB of the last byte, but the following code reads it bitwise in little-endian(LSB first)
+	// appendData[71] = 0x80 = 10000000
+	// ↓
+	// bit order in newP: 0 0 0 0 0 0 0 1  ← last bit is a `1` (bit 7)
+
+	// -------------------------------- Append padded bits to the message ----------------------------------------------
+	// Each byte of appendData is expanded into 8 bits (little-endian order).
+	// Now newP contains 1088 bits (136 × 8).
 	for i := 0; i < 136-64; i++ {
 		for j := 0; j < 8; j++ {
 			newP = append(newP, int((appendData[i]>>j)&1))
 		}
 	}
+	// -------------------------------- Split into 17 lanes of 64 bits ------------------------------------------
+	// These 1088 bits are packed into 17 64-bit slices = 17 Keccak lanes.
 	p := make([][]frontend.Variable, 17)
 	for i := 0; i < 17; i++ {
 		p[i] = make([]frontend.Variable, 64)
@@ -276,19 +301,42 @@ func computeKeccak(api frontend.API, P []frontend.Variable) []frontend.Variable 
 			p[i][j] = newP[i*64+j]
 		}
 	}
+
+	// -------------------------------- Absorb phase: inject padded message block ----------------------------------
+	// p := input (512 bits) + pad10*1 = exactly 1088 bits = 1 block
+	// state[0:r] ^= p
 	ss = xorIn(api, ss, p)
+	// Only the first 17 lanes of the state are XORed with the input block.
+
+	// -------------------------------- Apply Keccak-f permutation (24 rounds) -----------------------------------
+	// Applies full Keccak-f[1600], including 24 rounds of: θ → ρ → π → χ → ι
+	// Internally uses XOR, AND, NOT, ROTATE — all at bit-level with constraints.
 	ss = keccakF(api, ss)
+
+	// ------------------------- Squeeze phase: extract 32-byte = 256-bit digest -----------------------------------
+	// Reads the first 256 bits from the rate portion of the state (first 136 bytes).
+	// For SHA3-256, 1 extraction round is enough
 	out := copyOutUnaligned(api, ss, 136, 32)
+	// out is a 256-length []frontend.Variable, representing the final Keccak digest in bit form.
 	return out
 }
 
+// Define(api frontend.API) is the core interface required by gnark and ecgo circuits. This function builds the constraints of the zk-SNARK circuit.
+// It is called by the compiler to generate the circuit. 
+// Inputs: 
+// - `api`: the constraint system builder — you use this to create gates
+// Outputs:
+// - `t`: circuit struct, now filled with symbolic variables (t.P[i][j], t.Out[i][j]) 
 func (t *keccak256Circuit) Define(api frontend.API) error {
 	// You can use builder.MemorizedVoidFunc for sub-circuits
 	// f := builder.Memorized1DFunc(computeKeccak)
 	f := computeKeccak
 	for i := 0; i < NHashes; i++ {
+		// This iterates through NHashes = 8 hash computations.
+		// For each input block t.P[i] (512 bits), it calls your previously defined function computeKeccak(api, input), which returns []frontend.Variable — the output bits (256-bit hash).
 		out := f(api, t.P[i][:])
 		for j := 0; j < CheckBits; j++ {
+			// Compares each output bit from the internal computation (out[j]) to the expected public output stored in t.Out[i][j].
 			api.AssertIsEqual(out[j], t.Out[i][j])
 		}
 	}
@@ -296,57 +344,110 @@ func (t *keccak256Circuit) Define(api frontend.API) error {
 }
 
 func main() {
+	// ----------------Build and Compile the Keccak-256 circuit over GF(2) using Expander's ecgo frontend----------------
 	var circuit keccak256Circuit
+
+	// This compiles the keccak256Circuit struct (which implements Define())
+	// cr is the compiled representation, including internal wiring.
+	// inputs and outputs of Compile()	:
+	// - function signature: func Compile(field *big.Int, circuit frontend.Circuit, opts ...frontend.CompileOption) (*CompileResult, error)
+	// - inputs:
+	//   | Parameter | Type                        | Meaning                                                                                          |
+	//   | --------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
+	//   | `field`   | `*big.Int`                  | The finite field over which the circuit is defined (e.g. `gf2.ScalarField`)                      |
+	//   | `circuit` | `frontend.Circuit`          | A user-defined circuit struct (e.g. `keccak256Circuit`) that implements the `Define(api)` method |
+	//   | `opts`    | variadic `...CompileOption` | Optional configuration flags (e.g. compression thresholds, debug flags, etc.)                    |
+	// - outputs:
+	//   | Field            | Type           | Meaning                                        |
+	//   | ---------------- | -------------- | ---------------------------------------------- |
+	//   | `*CompileResult` | Struct pointer | Contains all artifacts of the compiled circuit |
+    //   | `error`          | error          | Non-nil if compilation failed                  |
 
 	cr, err := ecgo.Compile(gf2.ScalarField, &circuit)
 	if err != nil {
 		panic(err)
 	}
 
+	// Gets the internal LayeredCircuit (i.e., gate-level logic).
 	c := cr.GetLayeredCircuit()
 	//c.Print()
+	// Writes it to disk for inspection (circuit.txt).
 	os.WriteFile("circuit.txt", c.Serialize(), 0o644)
+	// Then deserializes it — a safeguard to ensure the circuit is cleanly reconstructed.
 	c = ecgo.DeserializeLayeredCircuit(c.Serialize())
 
+	// Loop over NHashes = 8 hash computations
+	// Each loop creates a separate Keccak-256 hash task with:
+	// 1. Random 512-bit input
+	// 2. Corresponding 256-bit Keccak output
+	// 3. Populated circuit input/output
 	for k := 0; k < NHashes; k++ {
+		// -------------------------------- Generating random inputs (64 bytes = 512 bits) ----------------------------------
+		// Initialize all bits to zero
+		// 64 * 8 = 512 bits of input for each Keccak instance.
 		for i := 0; i < 64*8; i++ {
 			circuit.P[k][i] = 0
 		}
 
+		// Generate random 64-byte(i.e., 512 bits) message
 		data := make([]byte, 64)
 		rand.Read(data)
-		hash := crypto.Keccak256Hash(data)
+
+		// Convert message into bit-level input
+		// Converts the 64-byte message into 512 individual bits (bit 0 is the least significant bit).
+		// Stored into circuit.P[k], which is used in the circuit as private input.
 		for i := 0; i < 64; i++ {
 			for j := 0; j < 8; j++ {
 				circuit.P[k][i*8+j] = int((data[i] >> j) & 1)
 			}
 		}
 
+		// -------------------- Computing the real Keccak-256 hash using Ethereum's reference implementation -------------------
+		// Uses the Ethereum-standard Keccak implementation to compute the correct output.
+		// Output is 256 bits (32 bytes).
+		hash := crypto.Keccak256Hash(data)
+
+		// Convert hash output to bits
+		// Converts the 32-byte hash into a 256-bit Boolean array (bit 0 = LSB).
+		// This becomes the expected public output for that input.
 		outBits := make([]int, 256)
 		for i := 0; i < 32; i++ {
 			for j := 0; j < 8; j++ {
 				outBits[i*8+j] = int((hash[i] >> j) & 1)
 			}
 		}
+		// Store hash output into the circuit’s public output field
+		// This is what the circuit must match to pass verification (api.AssertIsEqual() in Define()).
 		for i := 0; i < CheckBits; i++ {
 			circuit.Out[k][i] = outBits[i]
 		}
 	}
 
+	// ---------------------------- Performing three different witness checks -------------------------------------------------
+	// Shared Setup: Prepare the witness solver
 	is := ecgo.DeserializeInputSolver(cr.GetInputSolver().Serialize())
+
+	// Test 1: Solve with correct input and verify
+	// 	Given the circuit whose .P and .Out fields have already been populated,
+	// 	This line returns the witness, i.e., values for all internal wires (not just the inputs).
 	wit, err := is.SolveInput(&circuit, 0)
 	if err != nil {
 		panic("gg")
 	}
 
+	// This line checks that the witness actually satisfies all constraints in the compiled circuit c
 	if !test.CheckCircuit(c, wit) {
 		panic("should succeed")
 	}
 	fmt.Println("test 1 passed")
 
+	// Test 2: Flip 1 bit of input and confirm circuit fails
+	//  For each Keccak input, you flip the first bit of the input (from 0 → 1 or 1 → 0).
+	//  But the circuit.Out[k] hash remains unchanged — meaning it’s now mismatched.
 	for k := 0; k < NHashes; k++ {
 		circuit.P[k][0] = 1 - circuit.P[k][0].(int)
 	}
+	// This should now fail because the output no longer matches what the Keccak circuit computes from the modified input.
 	wit, err = is.SolveInput(&circuit, 0)
 	if err != nil {
 		panic("gg")
@@ -357,8 +458,13 @@ func main() {
 	}
 	fmt.Println("test 2 passed")
 
+	// Test 3: Batch test 16 random inputs
+	// You are preparing 16 new Keccak hash computations.
 	assignments := make([]frontend.Circuit, 16)
 	for z := 0; z < 16; z++ {
+		// Each assignment has the following done:
+		// Input P[k] is filled with random 64-byte message (bit-level)
+		// Output Out[k] is set to the true Keccak-256 hash of that message
 		assignment := &keccak256Circuit{}
 		for k := 0; k < NHashes; k++ {
 			for i := 0; i < 64*8; i++ {
@@ -384,11 +490,14 @@ func main() {
 		}
 		assignments[z] = assignment
 	}
+	// This returns a batched witness for all 16 input circuits.
 	wit, err = is.SolveInputs(assignments)
 	if err != nil {
 		panic("gg")
 	}
+	// Stores the witness on disk for later inspection.
 	os.WriteFile("witness.txt", wit.Serialize(), 0o644)
+	// This runs all 16 assignments against the compiled circuit and ensures they all pass.
 	ss := test.CheckCircuitMultiWitness(c, wit)
 	for _, s := range ss {
 		if !s {
