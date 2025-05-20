@@ -20,6 +20,7 @@ const CheckBits = 256
 var rcs [][]uint
 
 func init() {
+	// Each round constant RC[i] is computed using a linear-feedback shift register (LFSR) defined in the spec.
 	var rc [24]*big.Int
 	rc[0], _ = new(big.Int).SetString("0000000000000001", 16)
 	rc[1], _ = new(big.Int).SetString("0000000000008082", 16)
@@ -54,11 +55,28 @@ func init() {
 		}
 	}
 }
-
+// Function Purpose:
+	// This function models the absorb phase in the Keccak sponge construction.
+	// For each message block 𝑀𝑖,
+	// XOR it into the first r/w lanes of the Keccak state 𝑆[𝑥,𝑦],
+	// where 𝑟 = 1088, 𝑤 = 64 → 𝑟/𝑤 = 17 lanes.
+// Inputs:
+	// - `api`: the constraint system builder
+	// - `s`: The Keccak state A[x,y], as a flattened 1D array of 25 lanes (each lane is 64 bits)
+	// - `buf`: The current message block, also as [][]frontend.Variable (17 lanes × 64 bits)
+// Outputs:
+	// - `s`: The updated Keccak state after XORing the message block into the first r/w lanes
+// Gate Count:
+	// pure binary circuits: 17 lanes × 64 bits = 1,088 XOR gates
+	// word-boolean-circuits: 17 lanes × 8 words = 136 XOR word gates
 func xorIn(api frontend.API, s [][]frontend.Variable, buf [][]frontend.Variable) [][]frontend.Variable {
+	// Traverses each lane in order: (x, y) → 5*x + y
+	// For the first 17 lanes (< len(buf)), applies: s[5*x + y] = s[5*x + y] XOR buf[x + 5*y]
 	for y := 0; y < 5; y++ {
 		for x := 0; x < 5; x++ {
 			if x+5*y < len(buf) {
+				// xor: lane level in code
+				// in circuit level: for each bit in the 64-bit lane, 1 Add gate is emitted (XOR in GF(2)), Therefore: 64 gates per lane
 				s[5*x+y] = xor(api, s[5*x+y], buf[x+5*y])
 			}
 		}
@@ -66,7 +84,23 @@ func xorIn(api frontend.API, s [][]frontend.Variable, buf [][]frontend.Variable)
 	return s
 }
 
+// Function Purpose:
+	// full implementation of the Keccak-f[1600] permutation applied 24 times inside a zk circuit over GF(2)
+// Inputs:
+	// - `api`: the constraint system builder
+	// - `a`: the state array (25 lanes, each 64 bits), laid out as a[0] to a[24]
+	//        The state corresponds to the 5×5 Keccak matrix A[x][y], flattened row-major
+	// 	      Each round modifies a in place using Keccak's 5 round steps
+// Outputs:
+	// - `a`: the modified state array after 24 rounds of Keccak-f[1600]
 func keccakF(api frontend.API, a [][]frontend.Variable) [][]frontend.Variable {
+	// It preallocates storage for temporary Keccak lanes used during each round.
+	// | Variable    | Size                | Purpose                                                                                 |
+	// | ----------- | ------------------- | --------------------------------------------------------------------------------------- |
+	// | `b[25][64]` | 25 lanes × 64 bits  | Stores intermediate results after ρ and π steps (rotated & permuted lanes)              |
+	// | `c[5][64]`  | 5 columns × 64 bits | Stores column parity for θ step                                                         |
+	// | `d[5][64]`  | 5 columns × 64 bits | Stores θ diffusion terms: $D[x] = C[x−1] ⊕ rot(C[x+1], 1)$                              |
+	// | `da[5][64]` | 5 lanes × 64 bits   | Similar to `d`, but uses direct lanes from `a` instead of `c` (optimizing lane-based θ) |
 	var b [25][]frontend.Variable
 	for i := 0; i < len(b); i++ {
 		b[i] = make([]frontend.Variable, 64)
@@ -96,24 +130,81 @@ func keccakF(api frontend.API, a [][]frontend.Variable) [][]frontend.Variable {
 		}
 	}
 
+	// Loop: 24 rounds: 
+	// Each round performs the full sequence: θ → ρ → π → χ → ι
 	for i := 0; i < 24; i++ {
+		// -------------------------------- θ step --------------------------------
+		// θ step computes:
+		// C[x]=A[x,0]⊕A[x,1]⊕A[x,2]⊕A[x,3]⊕A[x,4] → column parity
+		// D[x]=C[x−1]⊕ROT(C[x+1],1) → mixes across columns
+		// A[x,y]=A[x,y]⊕D[x] → apply this to all lanes in column x
+
+		// This computes: C[x]=A[x,0]⊕A[x,1]⊕A[x,2]⊕A[x,3]⊕A[x,4] for x in 0..4
+		// assumes a[x+5*y] instead of a[5x+y], which suggests it's using column-major layout
+		// vanilla implementation would be: c[x] = a[x][0] ⊕ a[x][1] ⊕ a[x][2] ⊕ a[x][3] ⊕ a[x][4]
+			// Gate count: 
+				// pure binary circuits: 5 columns × 4 xor calls × 64 bits = 1280 XOR gates
+				// word-boolean-circuits: 5 columns × 4 xor calls × 8 words = 160 gates
 		c[0] = xor(api, xor(api, a[1], a[2]), xor(api, a[3], a[4]))
 		c[1] = xor(api, xor(api, a[6], a[7]), xor(api, a[8], a[9]))
 		c[2] = xor(api, xor(api, a[11], a[12]), xor(api, a[13], a[14]))
 		c[3] = xor(api, xor(api, a[16], a[17]), xor(api, a[18], a[19]))
 		c[4] = xor(api, xor(api, a[21], a[22]), xor(api, a[23], a[24]))
 
+		// This gives: D[x]=C[x−1]⊕ROT(C[x+1],1)
+		// each C[i] is 64 bits
+		// vanilla implementation would be: D[x] = C[x-1] ⊕ ROT(C[x+1], 1)
+		// Gate count:
+			// pure binary circuits: 5 columns × 1 xor call × 64 bits = 320 XOR gates
+			// word-boolean-circuits: 5 columns × 1 xor call × 8 words = 40 gates(XOR with rotate)
 		for j := 0; j < 5; j++ {
 			d[j] = xor(api, c[(j+4)%5], rotateLeft(c[(j+1)%5], 1))
+			// da[j]=A[j−1,0]⊕ROT(A[j+1,0],1)
 			da[j] = xor(api, a[((j+4)%5)*5], rotateLeft(a[((j+1)%5)*5], 1))
 		}
-
+		// A[x,y]=A[x,y]⊕D[x]
+		// Gate count:
+			// pure binary circuits: 5 columns × 5 rows × 64 bits = 1600 XOR gates
+			// word-boolean-circuits: 5 columns × 5 rows × 8 words = 200 gates
 		for j := 0; j < 25; j++ {
 			tmp := xor(api, da[j/5], a[j])
 			a[j] = xor(api, tmp, d[j/5])
 		}
 
+		// Case 1: Pure Keccak-style θ (Spec-Aligned)
+		// | Step                 | Calls  | Bits per call | Total XOR Gates (bit-level) | Total Word Gates (8-bit) |
+		// | -------------------- | ------ | ------------- | --------------------------- | ------------------------ |
+		// | `C[x]`: 5-input XOR  | 5 × 4  | 64            | 1280                        | 160                      |
+		// | `D[x]` (with rotate) | 5 × 1  | 64            | 320                         | 40 *(with rotate)        |
+		// | `A[x,y]` update      | 25 × 1 | 64            | 1600                        | 200                      |
+		// | **Total**            |        |               | **3200**                    | **400** ✅               |
+		
+		// Case 2: Implementation (with da[x])
+		// | Step                                 | Calls  | Bits per call | Total XOR Gates (bit-level) | Total Word Gates (8-bit) |
+		// | ------------------------------------ | ------ | ------------- | --------------------------- | ------------------------ |
+		// | `C[x]`: 4-input XOR (misses A\[x,0]) | 5 × 3  | 64            | 960                         | 120                      |
+		// | `D[x]` (with rotate)                 | 5 × 1  | 64            | 320                         | 40  *(with rotate)       |
+		// | `da[x]` (with rotate)                | 5 × 1  | 64            | 320                         | 40  *(with rotate)       |
+		// | `A[x,y]` update (2× XOR per lane)    | 25 × 2 | 64            | 3200                        | 400                      |
+		// | **Total**                            |        |               | **4800** ❌                  | **600** ❌                |
+		// This style of optimization comes from word-oriented ZK systems (e.g., Groth16, Halo2), where reducing logic depth or reusing intermediate wires (like da[x]) can help. 
+
+		// --------------------------- ρ and π step --------------------------------
 		/*Rho and pi steps*/
+		// ρ (Rho): Bitwise rotation of each lane (64-bit)
+		// π (Pi): Permutation of lane positions in the state
+		
+		// Purpose of this Code Block: b[...] = rotateLeft(a[...], ...)
+		// This entire block transforms the Keccak state a[0..24] into b[0..24], where:
+		// a[i] represents the lane A[x,y]
+		// b[i] is the rotated and permuted version B[y,(2x+3y)]
+		// ρ Step: Bit Rotation
+			// Each lane in the state is rotated left by a constant (different for each position), defined by Keccak-f's spec. For example:
+			// rotateLeft(a[1], 36) means the lane a[1] is rotated left by 36 bits.
+			// The constants (like 36, 3, 41, ...) come from the Keccak rotation offset table.
+			// These offsets are fixed for each position (x, y) in the Keccak 5×5 grid.
+		// π Step: Permutation
+			// B[y][(2x+3y)mod5]=ROT(A[x][y],r[x][y])
 		b[0] = a[0]
 
 		b[8] = rotateLeft(a[1], 36)
@@ -145,8 +236,22 @@ func keccakF(api frontend.API, a [][]frontend.Variable) [][]frontend.Variable {
 		b[17] = rotateLeft(a[23], 8)
 		b[20] = rotateLeft(a[24], 14)
 
-		/*Xi state*/
+		// gate count: Pure wire routing (no API ops)
+		// !! will meet problems if B = 8, cross-word rotations
 
+		// --------------------------- χ step --------------------------------
+		// A[x,y]=B[x,y]⊕(¬B[x+1,y]∧B[x+2,y])
+		// Each row (5 lanes) is updated using its neighbors
+		// This is the only nonlinear step in Keccak
+		/*Xi state*/
+		// a[x + 5*y] = b[x + 5*y] ⊕ (¬b[(x+1)%5 + 5*y] ∧ b[(x+2)%5 + 5*y])
+		// for each update, consists of:
+			// NOT (per bit): ¬b[i+1]
+			// 1 AND: (¬b[i+1]) ∧ b[i+2]
+            // 1 XOR: with b[i]
+		// gate count:
+			// pure binary circuits: 5 rows × 5 lanes × 64 bits = 1600 AND gates + 1600 XOR gates + 1600 NOT gates(equivalent to AND gates)
+			// word-boolean-circuits: 5 rows × 5 lanes × 8 words = 200 AND gates + 200 XOR gates + 200 NOT gates
 		a[0] = xor(api, b[0], and(api, not(api, b[5]), b[10]))
 		a[1] = xor(api, b[1], and(api, not(api, b[6]), b[11]))
 		a[2] = xor(api, b[2], and(api, not(api, b[7]), b[12]))
@@ -177,13 +282,23 @@ func keccakF(api frontend.API, a [][]frontend.Variable) [][]frontend.Variable {
 		a[23] = xor(api, b[23], and(api, not(api, b[3]), b[8]))
 		a[24] = xor(api, b[24], and(api, not(api, b[4]), b[9]))
 
+		// --------------------------- ι step --------------------------------
+		// XOR round constant RC[i] into a[0] (lane A[0,0]), A[0][0]=A[0][0]⊕RC[i]
+		// The rcs array stores RC[i] as bits
+		// Only bits where rcs[i][j] == 1 are flipped using 1 ⊕ a[0][j] = 1 - a[0][j]
 		///*Last step*/
-
+		// For each bit A[0][0],
+		// if the round constant RC[i][j]=1,
+		// then flip that bit: a[0][j]=1−a[0][j]
+		// !! rcs (the round constants used in the ι step) are public, fixed, and universal for all Keccak permutations of a given width.
 		for j := 0; j < len(a[0]); j++ {
 			if rcs[i][j] == 1 {
 				a[0][j] = api.Sub(1, a[0][j])
 			}
 		}
+		// gate count:
+			// pure binary circuits: 1 round constant × 64 bits = 64 NOT gates(equivalent to AND gates)
+			// word-boolean-circuits: 1 round constant × 8 words = 8 NOT gates(equivalent to AND gates)
 	}
 
 	return a
@@ -218,11 +333,26 @@ func and(api frontend.API, a []frontend.Variable, b []frontend.Variable) []front
 func not(api frontend.API, a []frontend.Variable) []frontend.Variable {
 	bitsRes := make([]frontend.Variable, len(a))
 	for i := 0; i < len(a); i++ {
+		// But subtraction is same cost as addition in GF(2), so this is equivalent to: res[i] = Add(1, a[i])  // modulo 2
 		bitsRes[i] = api.Sub(1, a[i])
 	}
 	return bitsRes
 }
 
+// rotateLeft(b,k)[i]=b[(i−k) mod n]
+// this is purely a Go-level wire reindexing operation, which just reordering references to existing frontend.Variables, not computing anything new.
+// What happens at the circuit level?
+// If:
+// a := []frontend.Variable{a₀, a₁, a₂, ..., a₆₃}
+// b := rotateLeft(a, 1)
+// Then:
+// b[0] = a[63]
+// b[1] = a[0]
+// b[2] = a[1]
+// ...
+// b[63] = a[62]
+// These are just wires reused in new places.
+// When you later do api.Add(b[i], ...), the constraint will refer to the original wire a[j], just in a different place.
 func rotateLeft(bits []frontend.Variable, k int) []frontend.Variable {
 	n := uint(len(bits))
 	s := uint(k) & (n - 1)
