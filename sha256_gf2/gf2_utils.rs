@@ -83,6 +83,14 @@ pub fn lower_case_sigma0<C: Config, Builder: RootAPI<C>>(
     xor(api, &tmp, &shft3)
 }
 
+// σ₁(x) = ROTR¹⁷(x) ⊕ ROTR¹⁹(x) ⊕ SHR¹⁰(x)
+// sigma1 function: ROTR(x, 17) XOR ROTR(x, 19) XOR SHR(x, 10)
+// Input:
+//      - word: 32-bit
+// Output: 32 bits
+// Gate count:
+//      - pure boolean gates: 32 bits per word × 2 XOR word gates = 64 XOR gates
+//      - word boolean gates(B = 32): 2 XOR word gates
 pub fn lower_case_sigma1<C: Config, Builder: RootAPI<C>>(
     api: &mut Builder,
     word: &Sha256Word,
@@ -96,6 +104,8 @@ pub fn lower_case_sigma1<C: Config, Builder: RootAPI<C>>(
 }
 
 // Sigma0 function: ROTR(x, 2) XOR ROTR(x, 13) XOR ROTR(x, 22)
+// compare to lower_case_sigma0, shift and rotate same in pure boolean circuit,
+// but will be different in word boolean circuit when B < 32
 pub fn capital_sigma0<C: Config, Builder: RootAPI<C>>(
     api: &mut Builder,
     x: &Sha256Word,
@@ -121,22 +131,39 @@ pub fn capital_sigma1<C: Config, Builder: RootAPI<C>>(
     xor(api, &tmp, &rot25)
 }
 
+// It computes: a + b with carry, one bit at a time, using Boolean gates.
+// Brent-Kung GF(2) addition
 pub fn add_const<C: Config, Builder: RootAPI<C>>(
     api: &mut Builder,
-    a: &Sha256Word,
-    b: u32,
+    a: &Sha256Word, // 32 bits
+    b: u32,         // constant u32
 ) -> Sha256Word {
     let n = a.len();
     let mut c = *a;
+    // We track a carry bit ci, initialized as 0.
     let mut ci = api.constant(0);
+    // The loop goes from the least significant bit (bit 31) down to the most significant (bit 0)
+    // loop has 32 rounds, for each round:
+    // 1. If b[i] = 1, we use 3 XOR gates and 1 AND gate to compute the sum bit and carry out.
+    // 2. If b[i] = 0, we use 1 XOR gate and 1 AND gate to compute the sum bit and carry out.
     for i in (0..n).rev() {
         if (b >> (31 - i)) & 1 == 1 {
-            let p = api.add(a[i], 1);
-            c[i] = api.add(p, ci);
+            // Case 1: Bit b[i] = 1
+            // sum_bit = a[i] ⊕ 1 ⊕ carry
+            // carry_out = (¬a[i] ∧ carry) ⊕ a[i]
 
+            // p = a[i] ⊕ 1 = ¬a[i]
+            let p = api.add(a[i], 1);
+            // c[i] = sum_bit = a[i] ⊕ 1 ⊕ carry
+            c[i] = api.add(p, ci);
+            // ¬a[i] ∧ carry
             ci = api.mul(ci, p);
+            // ci = carry_out = (¬a[i] ∧ carry) ⊕ a[i]
             ci = api.add(ci, a[i]);
         } else {
+            // Case 2: Bit b[i] = 0
+            // sum_bit = a[i] ⊕ carry
+            // carry_out = a[i] ∧ carry
             c[i] = api.add(c[i], ci);
             ci = api.mul(ci, a[i]);
         }
@@ -145,12 +172,18 @@ pub fn add_const<C: Config, Builder: RootAPI<C>>(
 }
 
 // The brentkung addition algorithm, recommended
+// This code implements 32-bit addition with carry using the Brent-Kung parallel prefix adder structure — fully adapted to Boolean circuits over GF(2).
+// key idea of this function is to divide the 32-bit addition into 8 groups of 4 bits each and call the 4-bit Brent-Kung adder for each group.
+// The carry-out from one group flows into the next group
 pub fn add_brentkung<C: Config, Builder: RootAPI<C>>(
     api: &mut Builder,
     a: &Sha256Word,
     b: &Sha256Word,
 ) -> Sha256Word {
     // temporary solution to change endianness, big -> little
+    // Endian Fix (big-endian → little-endian)
+    // Brent-Kung logic is naturally little-endian (carry flows from low bits to high bits).
+    // SHA-256 bit order is big-endian, so this is just temporary reversal.
     let mut a = *a;
     let mut b = *b;
     a.reverse();
@@ -160,9 +193,12 @@ pub fn add_brentkung<C: Config, Builder: RootAPI<C>>(
     let mut ci = api.constant(0);
 
     for i in 0..8 {
+        // Break into 4-bit blocks
         let start = i * 4;
         let end = start + 4;
 
+        // Divide 32 bits into 8 groups of 4 bits and use a 4-bit Brent-Kung adder for each group
+        // Carry-out from one group flows into the next (serially)
         let (sum, ci_next) = brent_kung_adder_4_bits(api, &a[start..end], &b[start..end], ci);
         ci = ci_next;
 
@@ -170,6 +206,7 @@ pub fn add_brentkung<C: Config, Builder: RootAPI<C>>(
     }
 
     // temporary solution to change endianness, little -> big
+    // After addition is done, the word is reversed back to big-endian.
     c.reverse();
     c.try_into().unwrap()
 }
@@ -231,13 +268,25 @@ pub fn add<C: Config, Builder: RootAPI<C>>(
     add_brentkung(api, a, b)
 }
 
+// Goal: Return sums of a list of u32 using GF(2) full addition with carry
+// Input: A list of n 32-bit words (vs)
+// Binary Tree Summation
+// Instead of adding the values linearly: ((v₀ + v₁) + v₂) + v₃ ...
+// which has linear depth, we reduce the depth by using: sum = ((v₀ + v₁), (v₂ + v₃), ...) → pairwise reduce
 pub fn sum_all<C: Config, Builder: RootAPI<C>>(api: &mut Builder, vs: &[Sha256Word]) -> Sha256Word {
     let mut n_values_to_sum = vs.len();
     let mut vvs = vs.to_vec();
 
     // Sum all values in a binary tree fashion to produce fewer layers in the circuit
+    // Each round does:
+    //      Add pairs: v[i] = v[i] + v[i + half]
+    //      If odd number of inputs, carry the last one up unchanged
+    //      Halve the number of active values
+    // Repeat until only one result remains.
+    // This is a binary tree reduction, sometimes called pairwise folding.
     while n_values_to_sum > 1 {
         let half_size_floor = n_values_to_sum / 2;
+
         for i in 0..half_size_floor {
             vvs[i] = add(api, &vvs[i], &vvs[i + half_size_floor])
         }
