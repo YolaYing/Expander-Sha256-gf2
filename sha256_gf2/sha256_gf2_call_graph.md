@@ -44,14 +44,26 @@ Round_i
 │   ├── and(¬e, g)
 │   └── xor
 ├── sum_all(h, Σ₁, Ch, W+K)                        # 4-input tree adder
+│   ├── binary-tree of add()
 │   └── add (Brent-Kung style)
+│       ├── split into 8 × 4-bit segments
+│       ├── for each 4-bit group:
+│       │   └── brent_kung_adder_4_bits
+│       │       ├── generate g[i] = a[i] ∧ b[i]
+│       │       ├── generate p[i] = a[i] ⊕ b[i]
+│       │       ├── prefix tree: compute g[i:0]
+│       │       ├── compute carry[i] from g[..] + p[..]
+│       │       └── sum[i] = p[i] ⊕ carry[i]
+│       └── carries propagate serially across 4-bit blocks
 ├── capital_sigma0(a) = ROTR^2(a) ⊕ ROTR^13(a) ⊕ ROTR^22(a)
 │   └── rotate_right
 ├── maj(a, b, c) = (a ∧ b) ⊕ (a ∧ c) ⊕ (b ∧ c)
 │   ├── and
 │   └── xor
-├── temp1 = h + Σ₁ + ch + W[i] + K[i]
-├── temp2 = Σ₀ + maj
+├── temp1 = h + Σ₁ + ch + W[i] + K[i]               # from sum_all
+├── temp2 = Σ₀ + maj                                # one add()
 ├── [State Rotation]
 │   └── a..h ← rotated and updated using temp1 and temp2
+│       ├── e = d + temp1     ← add()
+│       └── a = temp1 + temp2 ← add()
 ```
