@@ -175,6 +175,10 @@ pub fn add_const<C: Config, Builder: RootAPI<C>>(
 // This code implements 32-bit addition with carry using the Brent-Kung parallel prefix adder structure — fully adapted to Boolean circuits over GF(2).
 // key idea of this function is to divide the 32-bit addition into 8 groups of 4 bits each and call the 4-bit Brent-Kung adder for each group.
 // The carry-out from one group flows into the next group
+// Gate count:
+//     - pure boolean gates:
+//          8 groups × 15 XOR gates per Brent-Kung adder = 120 XOR gates
+//          8 groups × 15 AND gates per Brent-Kung adder = 120 AND gates
 pub fn add_brentkung<C: Config, Builder: RootAPI<C>>(
     api: &mut Builder,
     a: &Sha256Word,
@@ -211,22 +215,64 @@ pub fn add_brentkung<C: Config, Builder: RootAPI<C>>(
     c.try_into().unwrap()
 }
 
+// Objective: 4-bit Brent-Kung adder
+// Adds a + b + carry_in for 4-bit inputs
+// Input: 4 bits of input A, 4 bits of input B, carry-in to bit 0
+// Output: a 4-bit sum and a final carry-out
+
+// Key idea: compute all carries for each bit position and then compute the sum
+// Generate (g[i] = a[i] ∧ b[i]): whether current bit position can generate a carry
+// Propagate (p[i] = a[i] ⊕ b[i]): whether current bit position can allow an incoming carry passing to the next position
+// Gate count:
+//     - pure boolean gates:
+//          4 XOR gates(generate and propagate) + 3 XOR gates(prefix computation) + 4 XOR gates(final carry evaluation) + 4 XOR gates(sum) = 15 XOR gates
+//          4 AND gates(generate and propagate) + 5 AND gates(prefix computation) + 6 AND gates(final carry evaluation) = 15 AND gates
+
 fn brent_kung_adder_4_bits<C: Config, Builder: RootAPI<C>>(
     api: &mut Builder,
-    a: &[Variable],
-    b: &[Variable],
-    carry_in: Variable,
+    a: &[Variable],     // 4 bits of input A
+    b: &[Variable],     // 4 bits of input B
+    carry_in: Variable, // carry-in to bit 0
 ) -> ([Variable; 4], Variable) {
     let mut g = [api.constant(0); 4];
     let mut p = [api.constant(0); 4];
 
     // Step 1: Generate and propagate
+    // gate count:
+    //     - pure boolean gates:
+    //          4 bits × 1 XOR gates = 4 XOR gates
+    //          4 bits × 1 AND gates = 4 AND gates
     for i in 0..4 {
         g[i] = api.mul(a[i], b[i]);
         p[i] = api.add(a[i], b[i]);
     }
 
     // Step 2: Prefix computation
+    // Gate count:
+    //     - pure boolean gates:
+    //          1 bits × 3 XOR gates = 3 XOR gates
+    //          1 bits × 5 AND gates = 5 AND gates
+    // compute prefix generate expressions
+    // do not consider the original carry_in, only consider generated carries
+
+    // Each g[i:0] represents whether any bit in [0, i] can generate a carry that reaches bit i+1
+    // g[1:0] = g[1] + p[1] ⋅ g[0]
+    // g[2:0] = g[2] + p[2] ⋅ g[1:0]
+    // ...
+    // (generated carry either from current bit or from previous bits)
+    // ？？should be tree structure:
+    //   Inputs:   g0     g1     g2     g3
+    //    Layer 1:    g[1:0]          g[3:2]
+    //                  \               /
+    //    Layer 2:        ← g[3:0] →
+    //
+    //   Step 1: Pairwise (parallel)
+    //      g10 = g1 + p1 ⋅ g0
+    //      g32 = g3 + p3 ⋅ g2
+
+    //   Step 2: Merge tree
+    //      g30 = g32 + (p2 ⋅ p3) ⋅ g10
+
     let p1g0 = api.mul(p[1], g[0]);
     let p0p1 = api.mul(p[0], p[1]);
     let p2p3 = api.mul(p[2], p[3]);
@@ -238,6 +284,17 @@ fn brent_kung_adder_4_bits<C: Config, Builder: RootAPI<C>>(
     let g30 = api.add(g[3], g30);
 
     // Step 3: Calculate carries
+    // Gate count:
+    //     - pure boolean gates:
+    //          1 bits × 4 XOR gates = 4 XOR gates
+    //          1 bits × 6 AND gates = 6 AND gates
+
+    // Final Carry Evaluation
+    // considering the original carry_in, we determine the actual carry-in at each bit using:
+    // carry[i] = g[0..i-1] + (p[0] ⋅ p[1] ⋯ p[i-1] ⋅ carry_in)
+    // This checks:
+    //      Whether the prefix segment itself generated a carry (g[0..i-1])
+    //      or whether the prefix segment allowed the original carry to pass through (p[0] ⋅ p[1] ⋯ p[i-1])
     let mut c = [api.constant(0); 5];
     c[0] = carry_in;
     let tmp = api.mul(p[0], c[0]);
@@ -252,6 +309,10 @@ fn brent_kung_adder_4_bits<C: Config, Builder: RootAPI<C>>(
     c[4] = api.add(g30, tmp);
 
     // Step 4: Calculate sum
+    // Gate count:
+    //     - pure boolean gates:
+    //          4 bits × 1 XOR gates = 4 XOR gates
+    // sum[i] = p[i] ⊕ carry[i]
     let mut sum = [api.constant(0); 4];
     for i in 0..4 {
         sum[i] = api.add(p[i], c[i]);
@@ -301,17 +362,42 @@ pub fn sum_all<C: Config, Builder: RootAPI<C>>(api: &mut Builder, vs: &[Sha256Wo
     vvs[0]
 }
 
+// 1-bit full adder
+// Input: a, b, carry_in
+// Output:
+//      sum: a⊕b⊕c
+//      carry_out: ab+bc+ac
+// Gate count:
+//     - pure boolean gates:
+//          1 bits × 4 XOR gates = 4 XOR gates
+//          1 bits × 3 AND gates = 3 AND gates
 fn bit_add_with_carry<C: Config, Builder: RootAPI<C>>(
     api: &mut Builder,
     a: Variable,
     b: Variable,
     carry: Variable,
 ) -> (Variable, Variable) {
+    // compute sum
+    // (a ⊕ b) ⊕ carry = a ⊕ b ⊕ c
     let sum = api.add(a, b);
     let sum = api.add(sum, carry);
 
     // a * (b + (b + 1) * carry) + (a + 1) * b * carry
     // = a * b + a * b * carry + a * b * carry + a * carry + b * carry
+    // explain: a⋅(b+(b+1)⋅c) → if b == 1: then result = 1, if b == 0: then result = c → b OR c
+    // carry=a⋅(b+¬b⋅c)+¬a⋅b⋅c = ab+a⋅¬b⋅c+¬a⋅b⋅c
+
+    // ?? a * b * carry + a * b * carry = 0??
+    // Optimized version:
+    // let ab = api.mul(a, b);
+    // let ac = api.mul(a, carry);
+    // let bc = api.mul(b, carry);
+
+    // // abc not needed
+
+    // let carry_next = api.add(ab, ac);
+    // let carry_next = api.add(carry_next, bc);
+
     let ab = api.mul(a, b);
     let ac = api.mul(a, carry);
     let bc = api.mul(b, carry);
@@ -334,6 +420,7 @@ pub fn add_vanilla<C: Config, Builder: RootAPI<C>>(
     let mut c = vec![api.constant(0); 32];
 
     let mut carry = api.constant(0);
+    // run bit_add_with_carry 32 times (once per bit)
     for i in (0..32).rev() {
         (c[i], carry) = bit_add_with_carry(api, a[i], b[i], carry);
     }
