@@ -133,6 +133,7 @@ impl SHA256GF2 {
             // Brent-Kung GF(2) addition: The Brent-Kung adder is a type of parallel prefix adder.
             //                            It is optimized to compute binary addition with carry using a logarithmic-depth tree of prefix operations
             let w_plus_k = add_const(api, &w[i], SHA256_K[i]);
+
             // Σ₁(e) = ROTR⁶(e) ⊕ ROTR¹¹(e) ⊕ ROTR²⁵(e)
             // Gate Count:
             //     - pure boolean gate: 64 rounds × 32 bits per word × 2 XOR word gates = 4,096 XOR gates
