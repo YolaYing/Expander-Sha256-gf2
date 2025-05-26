@@ -784,3 +784,73 @@ pub fn not<C: Config, Builder: RootAPI<C>>(api: &mut Builder, a: &Sha256Word) ->
     }
     bits_res
 }
+
+// === Carry-Save Adder ===
+// pub fn add_csa3<C: Config, Builder: RootAPI<C>>(
+//     api: &mut Builder,
+//     a: &Sha256Word,
+//     b: &Sha256Word,
+//     c: &Sha256Word,
+// ) -> (Sha256Word, Sha256Word) {
+//     let mut a = *a;
+//     let mut b = *b;
+//     let mut c = *c;
+//     a.reverse();
+//     b.reverse();
+//     c.reverse();
+
+//     let mut sum = [api.constant(0); 32];
+//     let mut carry = [api.constant(0); 33]; // carry[0] 是初始进位
+//     carry[0] = api.constant(0);
+
+//     for i in 0..32 {
+//         let a_add_b = api.add(a[i], b[i]);
+//         sum[i] = api.add(a_add_b, c[i]); // sum[i] = a[i] + b[i] + c[i]
+
+//         let ab = api.mul(a[i], b[i]);
+//         let bc = api.mul(b[i], c[i]);
+//         let ac = api.mul(a[i], c[i]);
+//         let ab_add_bc = api.add(ab, bc);
+//         carry[i + 1] = api.add(ab_add_bc, ac); // carry[i + 1] = a[i] * b[i] + b[i] * c[i] + a[i] * c[i]
+//     }
+
+//     let mut out_carry = [api.constant(0); 32];
+//     for i in 0..32 {
+//         out_carry[i] = carry[i]; // 对齐到下一位：carry[i] 作为第 i 位的 carry-in
+//     }
+
+//     sum.reverse();
+//     out_carry.reverse();
+
+//     (sum.try_into().unwrap(), out_carry.try_into().unwrap())
+// }
+
+pub fn add_csa3<C: Config, Builder: RootAPI<C>>(
+    api: &mut Builder,
+    a: &Sha256Word,
+    b: &Sha256Word,
+    c: &Sha256Word,
+) -> (Sha256Word, Sha256Word) {
+    let mut a = *a;
+    let mut b = *b;
+    let mut c = *c;
+    a.reverse();
+    b.reverse();
+    c.reverse();
+
+    // sum[i] = a[i] ⊕ b[i] ⊕ c[i]
+    let ab = xor(api, &a, &b);
+    let mut sum = xor(api, &ab, &c);
+
+    // carry[i+1] = Maj(a[i], b[i], c[i])
+    let maj_terms = maj(api, &a, &b, &c);
+    let mut carry = [api.constant(0); 32];
+
+    for i in 0..31 {
+        carry[i + 1] = maj_terms[i];
+    }
+
+    sum.reverse();
+    carry.reverse();
+    (sum.try_into().unwrap(), carry.try_into().unwrap())
+}

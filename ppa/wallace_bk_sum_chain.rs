@@ -21,28 +21,129 @@ pub fn add_csa3<C: Config, Builder: RootAPI<C>>(
 
     let mut sum = [api.constant(0); 32];
     let mut carry = [api.constant(0); 33]; // carry[0] 是初始进位
-    carry[0] = api.constant(0);
+
+    let mut ab = [api.constant(0); 32];
+    let mut bc = [api.constant(0); 32];
+    let mut ac = [api.constant(0); 32];
+    let mut tmp = [api.constant(0); 32];
 
     for i in 0..32 {
         let a_add_b = api.add(a[i], b[i]);
         sum[i] = api.add(a_add_b, c[i]); // sum[i] = a[i] + b[i] + c[i]
 
-        let ab = api.mul(a[i], b[i]);
-        let bc = api.mul(b[i], c[i]);
-        let ac = api.mul(a[i], c[i]);
-        let ab_add_bc = api.add(ab, bc);
-        carry[i + 1] = api.add(ab_add_bc, ac); // carry[i + 1] = a[i] * b[i] + b[i] * c[i] + a[i] * c[i]
+        ab[i] = api.mul(a[i], b[i]);
+        bc[i] = api.mul(b[i], c[i]);
+        ac[i] = api.mul(a[i], c[i]); // carry[i + 1] = a[i] * b[i] + b[i] * c[i] + a[i] * c[i]
+        tmp[i] = api.add(ab[i], bc[i]);
+        carry[i + 1] = api.add(tmp[i], ac[i]);
     }
 
     let mut out_carry = [api.constant(0); 32];
     for i in 0..32 {
-        out_carry[i] = carry[i]; // 对齐到下一位：carry[i] 作为第 i 位的 carry-in
+        out_carry[i] = carry[i]; // carry[0] 是初始进位，所以从 carry[1] 开始
     }
 
     sum.reverse();
     out_carry.reverse();
 
     (sum.try_into().unwrap(), out_carry.try_into().unwrap())
+}
+
+// === adder selector ===
+pub fn add<C: Config, Builder: RootAPI<C>>(
+    api: &mut Builder,
+    a: &Sha256Word,
+    b: &Sha256Word,
+) -> Sha256Word {
+    // add_brentkung(api, a, b)
+    // add_hancarlson(api, a, b)
+    // add_koggestone_32_bits(api, a, b)
+    add_koggestone_32_bits_prallel(api, a, b)
+}
+
+// === Kogge–Stone Parallel Adder ===
+fn xor<C: Config, Builder: RootAPI<C>>(
+    api: &mut Builder,
+    a: &Sha256Word,
+    b: &Sha256Word,
+) -> Sha256Word {
+    let mut out = [api.constant(0); 32];
+    for i in 0..32 {
+        out[i] = api.add(a[i], b[i]);
+    }
+    out
+}
+
+fn and<C: Config, Builder: RootAPI<C>>(
+    api: &mut Builder,
+    a: &Sha256Word,
+    b: &Sha256Word,
+) -> Sha256Word {
+    let mut out = [api.constant(0); 32];
+    for i in 0..32 {
+        out[i] = api.mul(a[i], b[i]);
+    }
+    out
+}
+
+fn shift_left<C: Config, Builder: RootAPI<C>>(
+    input: &Sha256Word,
+    shift: usize,
+    api: &mut Builder,
+) -> Sha256Word {
+    let mut out = [api.constant(0); 32];
+    for i in 0..32 {
+        out[i] = if i >= shift {
+            input[i - shift]
+        } else {
+            api.constant(0)
+        };
+    }
+    out
+}
+
+fn prefix_step<C: Config, Builder: RootAPI<C>>(
+    api: &mut Builder,
+    g: &Sha256Word,
+    p: &Sha256Word,
+    shift: usize,
+) -> (Sha256Word, Sha256Word) {
+    let g_shift = shift_left(g, shift, api);
+    let p_and_gshift = and(api, p, &g_shift);
+    let g_next = xor(api, g, &p_and_gshift);
+
+    let p_shift = shift_left(p, shift, api);
+    let p_next = and(api, p, &p_shift);
+
+    (g_next, p_next)
+}
+
+pub fn add_koggestone_32_bits_prallel<C: Config, Builder: RootAPI<C>>(
+    api: &mut Builder,
+    a: &Sha256Word,
+    b: &Sha256Word,
+) -> Sha256Word {
+    let mut a = *a;
+    let mut b = *b;
+    a.reverse();
+    b.reverse();
+
+    let mut p = xor(api, &a, &b);
+    let mut g = and(api, &a, &b);
+
+    let mut g_prefix = g.clone();
+    let mut p_prefix = p.clone();
+    for &shift in [1, 2, 4, 8, 16].iter() {
+        let (g_next, p_next) = prefix_step(api, &g_prefix, &p_prefix, shift);
+        g_prefix = g_next;
+        p_prefix = p_next;
+    }
+
+    let carry = shift_left(&g_prefix, 1, api);
+
+    let mut sum = xor(api, &p, &carry);
+    sum.reverse();
+    sum
 }
 
 // === Brent–Kung Adder ===
@@ -137,12 +238,12 @@ impl Define<GF2Config> for WallaceBKSumChainCircuit<Variable> {
 
         let (sum3, carry3) = add_csa3(api, &sum1, &carry1, &sum2);
         let (sum4, carry4) = add_csa3(api, &sum3, &carry3, &carry2);
-        let sum6 = add_brentkung(api, &sum4, &carry4); // out2
+        let sum6 = add(api, &sum4, &carry4); // out2
 
         // 第二条加法链
         let (sum5a, carry5) = add_csa3(api, &self.g, &self.d, &sum1);
         let (sum5b, carry6) = add_csa3(api, &carry1, &sum5a, &carry5);
-        let sum5 = add_brentkung(api, &sum5b, &carry6); // out1
+        let sum5 = add(api, &sum5b, &carry6); // out1
 
         for i in 0..32 {
             api.assert_is_equal(sum5[i], self.out1[i]);
@@ -200,4 +301,59 @@ fn test_wallace_bk_sum_chain() {
     }
 
     println!("✅ WallaceBKSumChain test passed with original sumchain logic.");
+}
+
+// === test add_csa3 ===
+declare_circuit!(CSA3TestCircuit {
+    a: [Variable; 32],
+    b: [Variable; 32],
+    c: [Variable; 32],
+    sum_out: [PublicVariable; 32],
+    carry_out: [PublicVariable; 32],
+});
+
+impl Define<GF2Config> for CSA3TestCircuit<Variable> {
+    fn define<Builder: RootAPI<GF2Config>>(&self, api: &mut Builder) {
+        let (sum, carry) = add_csa3(api, &self.a, &self.b, &self.c);
+
+        for i in 0..32 {
+            api.assert_is_equal(sum[i], self.sum_out[i]);
+            api.assert_is_equal(carry[i], self.carry_out[i]);
+        }
+    }
+}
+
+// === 测试函数 ===
+#[test]
+fn test_csa3_single() {
+    let compile_result = compile(&CSA3TestCircuit::default(), CompileOptions::default()).unwrap();
+    let CompileResult {
+        witness_solver,
+        layered_circuit,
+    } = compile_result;
+
+    let mut rng = rand::thread_rng();
+    for _ in 0..5 {
+        let a: u32 = rng.gen();
+        let b: u32 = rng.gen();
+        let c: u32 = rng.gen();
+
+        let sum = a ^ b ^ c;
+        let carry = ((a & b) ^ (a & c) ^ (b & c)) << 1;
+
+        let mut assignment = CSA3TestCircuit::<GF2>::default();
+        for i in 0..32 {
+            assignment.a[i] = ((a >> (31 - i)) & 1).into();
+            assignment.b[i] = ((b >> (31 - i)) & 1).into();
+            assignment.c[i] = ((c >> (31 - i)) & 1).into();
+            assignment.sum_out[i] = ((sum >> (31 - i)) & 1).into();
+            assignment.carry_out[i] = ((carry >> (31 - i)) & 1).into();
+        }
+
+        let witness = witness_solver.solve_witness(&assignment).unwrap();
+        let result = layered_circuit.run(&witness);
+        assert_eq!(result, vec![true]);
+    }
+
+    println!("✅ CSA3 adder passed!");
 }

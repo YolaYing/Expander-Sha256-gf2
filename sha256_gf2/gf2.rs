@@ -1,8 +1,8 @@
 use expander_compiler::frontend::{GF2Config, RootAPI, Variable};
 
 use super::gf2_utils::{
-    add, add_const, capital_sigma0, capital_sigma1, ch, lower_case_sigma0, lower_case_sigma1, maj,
-    sum_all, u32_to_bit, u64_to_bit, Sha256Word,
+    add, add_const, add_csa3, capital_sigma0, capital_sigma1, ch, lower_case_sigma0,
+    lower_case_sigma1, maj, sum_all, u32_to_bit, u64_to_bit, Sha256Word,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -127,39 +127,81 @@ impl SHA256GF2 {
         }
 
         // ----------------------------- Compression Loop -----------------------------
+        //========================= original code =========================
+        // for i in 0..64 {
+        //     // T₁ = h + Σ₁(e) + Ch(e, f, g) + K[i] + W[i]
+        //     // K[i] + W[i]
+        //     // Brent-Kung GF(2) addition: The Brent-Kung adder is a type of parallel prefix adder.
+        //     //                            It is optimized to compute binary addition with carry using a logarithmic-depth tree of prefix operations
+        //     let w_plus_k = add_const(api, &w[i], SHA256_K[i]);
+
+        //     // Σ₁(e) = ROTR⁶(e) ⊕ ROTR¹¹(e) ⊕ ROTR²⁵(e)
+        //     // Gate Count:
+        //     //     - pure boolean gate: 64 rounds × 32 bits per word × 2 XOR word gates = 4,096 XOR gates
+        //     //     - 32-bit word boolean gate: 64 rounds × 2 XOR 32-bit word gates = 128 XOR 32-bit word gates
+        //     let capital_sigma_1_e = capital_sigma1(api, &e);
+        //     // Ch(e,f,g) = (e ∧ f) ⊕ ((¬e) ∧ g)
+        //     let ch_e_f_g = ch(api, &e, &f, &g);
+        //     let t_1 = sum_all(api, &[h, capital_sigma_1_e, ch_e_f_g, w_plus_k]);
+
+        //     // T₂ = Σ₀(a) + Maj(a, b, c)
+        //     // Σ₀(a) = ROTR²(a) ⊕ ROTR¹³(a) ⊕ ROTR²²(a)
+        //     let capital_sigma_0_a = capital_sigma0(api, &a);
+        //     // Maj(a, b, c) = (a ∧ b) ⊕ (a ∧ c) ⊕ (b ∧ c)
+        //     let maj_a_b_c = maj(api, &a, &b, &c);
+        //     let t_2 = add(api, &capital_sigma_0_a, &maj_a_b_c);
+
+        //     // (a, b, ..., h) ← state rotation + update:
+        //     h = g;
+        //     g = f;
+        //     f = e;
+        //     e = add(api, &d, &t_1);
+        //     d = c;
+        //     c = b;
+        //     b = a;
+        //     a = add(api, &t_1, &t_2);
+        // }
+        // ========================= end of original code =========================
+
+        // ========================== optimized code =========================
         for i in 0..64 {
-            // T₁ = h + Σ₁(e) + Ch(e, f, g) + K[i] + W[i]
-            // K[i] + W[i]
-            // Brent-Kung GF(2) addition: The Brent-Kung adder is a type of parallel prefix adder.
-            //                            It is optimized to compute binary addition with carry using a logarithmic-depth tree of prefix operations
-            let w_plus_k = add_const(api, &w[i], SHA256_K[i]);
+            // === 构建输入 ===
+            let w_plus_k = add_const(api, &w[i], SHA256_K[i]); // b
+            let capital_sigma_1_e = capital_sigma1(api, &e); // c
+            let ch_e_f_g = ch(api, &e, &f, &g); // d
+            let capital_sigma_0_a = capital_sigma0(api, &a); // e
+            let maj_a_b_c = maj(api, &a, &b, &c); // f
 
-            // Σ₁(e) = ROTR⁶(e) ⊕ ROTR¹¹(e) ⊕ ROTR²⁵(e)
-            // Gate Count:
-            //     - pure boolean gate: 64 rounds × 32 bits per word × 2 XOR word gates = 4,096 XOR gates
-            //     - 32-bit word boolean gate: 64 rounds × 2 XOR 32-bit word gates = 128 XOR 32-bit word gates
-            let capital_sigma_1_e = capital_sigma1(api, &e);
-            // Ch(e,f,g) = (e ∧ f) ⊕ ((¬e) ∧ g)
-            let ch_e_f_g = ch(api, &e, &f, &g);
-            let t_1 = sum_all(api, &[h, capital_sigma_1_e, ch_e_f_g, w_plus_k]);
+            // === 第一阶段 Wallace Tree 加法链 ===
+            // sum1 = a + b + c = h + w_plus_k + capital_sigma_1_e
+            let (sum1, carry1) = add_csa3(api, &h, &w_plus_k, &capital_sigma_1_e);
+            // sum2 = d + e + f = ch + sigma0(a) + maj
+            let (sum2, carry2) = add_csa3(api, &ch_e_f_g, &capital_sigma_0_a, &maj_a_b_c);
 
-            // T₂ = Σ₀(a) + Maj(a, b, c)
-            // Σ₀(a) = ROTR²(a) ⊕ ROTR¹³(a) ⊕ ROTR²²(a)
-            let capital_sigma_0_a = capital_sigma0(api, &a);
-            // Maj(a, b, c) = (a ∧ b) ⊕ (a ∧ c) ⊕ (b ∧ c)
-            let maj_a_b_c = maj(api, &a, &b, &c);
-            let t_2 = add(api, &capital_sigma_0_a, &maj_a_b_c);
+            // sum3 = sum1 + carry1 + sum2
+            let (sum3, carry3) = add_csa3(api, &sum1, &carry1, &sum2);
+            // sum4 = sum3 + carry3 + carry2
+            let (sum4, carry4) = add_csa3(api, &sum3, &carry3, &carry2);
+            let t_2 = add(api, &sum4, &carry4); // output2 = updated_a
 
-            // (a, b, ..., h) ← state rotation + update:
+            // === 第二阶段 Wallace Tree 加法链 ===
+            // sum5a = g + d + sum1 = input_g + input_d + sum1
+            let (sum5a, carry5) = add_csa3(api, &d, &ch_e_f_g, &sum1);
+            // sum5b = carry1 + sum5a + carry5
+            let (sum5b, carry6) = add_csa3(api, &carry1, &sum5a, &carry5);
+            let t_1 = add(api, &sum5b, &carry6); // output1 = updated_e
+
+            // === 更新状态变量 ===
             h = g;
             g = f;
             f = e;
-            e = add(api, &d, &t_1);
+            e = t_1; // e = add(d, t₁)
             d = c;
             c = b;
             b = a;
-            a = add(api, &t_1, &t_2);
+            a = t_2; // a = add(t₁, t₂)
         }
+        // ========================= end of optimized code =========================
 
         state[0] = add(api, &state[0], &a);
         state[1] = add(api, &state[1], &b);
