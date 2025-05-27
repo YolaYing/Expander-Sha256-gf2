@@ -57,12 +57,24 @@ pub fn add_hancarlson_32_bits<C: Config, Builder: RootAPI<C>>(
     // Step 3: carry propagation
     let mut carry = [api.constant(0); 33];
     carry[0] = api.constant(0);
-    for i in 1..=32 {
-        if (i - 1) % 2 == 0 {
-            carry[i] = g_prefix[i - 1]; // even bits from tree
-        } else {
-            let and = api.mul(p[i - 1], carry[i - 1]);
-            carry[i] = api.add(g[i - 1], and); // odd bits from chain
+    // for i in 1..=32 {
+    //     if (i - 1) % 2 == 0 {
+    //         carry[i] = g_prefix[i - 1]; // even bits from tree
+    //     } else {
+    //         let and = api.mul(p[i - 1], carry[i - 1]);
+    //         carry[i] = api.add(g[i - 1], and); // odd bits from chain
+    //     }
+    // }
+    let block_size = 8;
+    for block_start in (1..=32).step_by(block_size) {
+        let block_end = (block_start + block_size - 1).min(32);
+        for i in block_start..=block_end {
+            if (i - 1) % 2 == 0 {
+                carry[i] = g_prefix[i - 1]; // still from tree
+            } else {
+                let and = api.mul(p[i - 1], carry[i - 1]);
+                carry[i] = api.add(g[i - 1], and);
+            }
         }
     }
 

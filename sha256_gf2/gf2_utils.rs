@@ -449,70 +449,70 @@ pub fn add_koggestone_32_bits_prallel<C: Config, Builder: RootAPI<C>>(
     sum
 }
 
-pub fn add_hancarlson_32_bits<C: Config, Builder: RootAPI<C>>(
-    api: &mut Builder,
-    a: &Sha256Word,
-    b: &Sha256Word,
-) -> Sha256Word {
-    // Han–Carlson adder operates on little-endian bit order
-    let mut a = *a;
-    let mut b = *b;
-    a.reverse();
-    b.reverse();
+// pub fn add_hancarlson_32_bits<C: Config, Builder: RootAPI<C>>(
+//     api: &mut Builder,
+//     a: &Sha256Word,
+//     b: &Sha256Word,
+// ) -> Sha256Word {
+//     // Han–Carlson adder operates on little-endian bit order
+//     let mut a = *a;
+//     let mut b = *b;
+//     a.reverse();
+//     b.reverse();
 
-    let mut g = [api.constant(0); 32]; // generate
-    let mut p = [api.constant(0); 32]; // propagate
+//     let mut g = [api.constant(0); 32]; // generate
+//     let mut p = [api.constant(0); 32]; // propagate
 
-    // Step 1: compute generate and propagate
-    for i in 0..32 {
-        g[i] = api.mul(a[i], b[i]); // g[i] = a[i] & b[i]
-        p[i] = api.add(a[i], b[i]); // p[i] = a[i] ^ b[i]
-    }
+//     // Step 1: compute generate and propagate
+//     for i in 0..32 {
+//         g[i] = api.mul(a[i], b[i]); // g[i] = a[i] & b[i]
+//         p[i] = api.add(a[i], b[i]); // p[i] = a[i] ^ b[i]
+//     }
 
-    let mut g_prefix = g.clone();
-    let mut p_prefix = p.clone();
+//     let mut g_prefix = g.clone();
+//     let mut p_prefix = p.clone();
 
-    // Step 2: build prefix tree for even indices
-    let mut gap = 1;
-    while gap < 32 {
-        let mut g_next = g_prefix.clone();
-        let mut p_next = p_prefix.clone();
+//     // Step 2: build prefix tree for even indices
+//     let mut gap = 1;
+//     while gap < 32 {
+//         let mut g_next = g_prefix.clone();
+//         let mut p_next = p_prefix.clone();
 
-        for i in 0..32 {
-            if i >= gap && i % 2 == 0 {
-                let and = api.mul(p_prefix[i], g_prefix[i - gap]);
-                g_next[i] = api.add(g_prefix[i], and);
-                p_next[i] = api.mul(p_prefix[i], p_prefix[i - gap]);
-            }
-        }
+//         for i in 0..32 {
+//             if i >= gap && i % 2 == 0 {
+//                 let and = api.mul(p_prefix[i], g_prefix[i - gap]);
+//                 g_next[i] = api.add(g_prefix[i], and);
+//                 p_next[i] = api.mul(p_prefix[i], p_prefix[i - gap]);
+//             }
+//         }
 
-        g_prefix = g_next;
-        p_prefix = p_next;
-        gap *= 2;
-    }
+//         g_prefix = g_next;
+//         p_prefix = p_next;
+//         gap *= 2;
+//     }
 
-    // Step 3: compute carry chain
-    let mut carry = [api.constant(0); 33];
-    carry[0] = api.constant(0);
+//     // Step 3: compute carry chain
+//     let mut carry = [api.constant(0); 33];
+//     carry[0] = api.constant(0);
 
-    for i in 1..=32 {
-        if (i - 1) % 2 == 0 {
-            carry[i] = g_prefix[i - 1];
-        } else {
-            let and = api.mul(p[i - 1], carry[i - 1]);
-            carry[i] = api.add(g[i - 1], and);
-        }
-    }
+//     for i in 1..=32 {
+//         if (i - 1) % 2 == 0 {
+//             carry[i] = g_prefix[i - 1];
+//         } else {
+//             let and = api.mul(p[i - 1], carry[i - 1]);
+//             carry[i] = api.add(g[i - 1], and);
+//         }
+//     }
 
-    // Step 4: final summation
-    let mut sum = [api.constant(0); 32];
-    for i in 0..32 {
-        sum[i] = api.add(p[i], carry[i]);
-    }
+//     // Step 4: final summation
+//     let mut sum = [api.constant(0); 32];
+//     for i in 0..32 {
+//         sum[i] = api.add(p[i], carry[i]);
+//     }
 
-    sum.reverse(); // convert back to big-endian
-    sum
-}
+//     sum.reverse(); // convert back to big-endian
+//     sum
+// }
 
 // pub fn han_carlson_adder_4_bits<C: Config, Builder: RootAPI<C>>(
 //     api: &mut Builder,
@@ -555,92 +555,168 @@ pub fn add_hancarlson_32_bits<C: Config, Builder: RootAPI<C>>(
 //     (sum, carry[4])
 // }
 
-pub fn han_carlson_adder_4_bits<C: Config, Builder: RootAPI<C>>(
+// pub fn han_carlson_adder_4_bits<C: Config, Builder: RootAPI<C>>(
+//     api: &mut Builder,
+//     a: &[Variable], // length = 4
+//     b: &[Variable], // length = 4
+//     carry_in: Variable,
+// ) -> ([Variable; 4], Variable) {
+//     let mut g = [api.constant(0); 4];
+//     let mut p = [api.constant(0); 4];
+
+//     // Step 1: Generate and Propagate
+
+//     for i in 0..4 {
+//         g[i] = api.mul(a[i], b[i]); // g[i] = a[i] & b[i]
+//         p[i] = api.add(a[i], b[i]); // p[i] = a[i] ^ b[i]
+//     }
+
+//     // Step 2: Prefix tree only on even indices
+//     let mut g_prefix = g;
+//     let mut p_prefix = p;
+
+//     // round 1: gap = 1, i = 2
+//     // g_prefix[2] = g[2] + p[2]*g[1]
+//     let p2_and_g1 = api.mul(p[2], g[1]);
+//     g_prefix[2] = api.add(g[2], p2_and_g1);
+//     // p_prefix[2] = p[2]*p[1]
+//     p_prefix[2] = api.mul(p[2], p[1]);
+
+//     // round 2: gap = 2, i = 2
+//     // g_prefix[2] = g_prefix[2] + p_prefix[2]*g[0]
+//     // p_prefix[2] = p_prefix[2]*p[0]
+//     let p2_and_g0 = api.mul(p_prefix[2], g[0]);
+//     g_prefix[2] = api.add(g_prefix[2], p2_and_g0);
+//     p_prefix[2] = api.mul(p_prefix[2], p[0]);
+
+//     // Step 3: Carry computation
+//     let mut carry = [api.constant(0); 5];
+//     carry[0] = carry_in;
+
+//     // for i in 1..=4 {
+//     //     if (i - 1) % 2 == 0 {
+//     //         carry[i] = g_prefix[i - 1]; // even: use prefix
+//     //     } else {
+//     //         let t = api.mul(p[i - 1], carry[i - 1]);
+//     //         carry[i] = api.add(g[i - 1], t); // odd: local
+//     //     }
+//     // }
+//     carry[1] = g_prefix[0]; // g[0]
+//     let p1_and_c1 = api.mul(p[1], carry[1]);
+//     carry[2] = api.add(g[1], p1_and_c1); // g[1] + p[1]*carry[1]
+//     carry[3] = g_prefix[2]; // g[2]
+//     let p3_and_c3 = api.mul(p[3], carry[3]);
+//     carry[4] = api.add(g[3], p3_and_c3); // g[3] + p[3]*carry[3]
+
+//     // Step 4: Final sum
+//     let mut sum = [api.constant(0); 4];
+//     for i in 0..4 {
+//         sum[i] = api.add(p[i], carry[i]);
+//     }
+
+//     (sum, carry[4]) // return final carry-out
+// }
+
+// pub fn add_hancarlson<C: Config, Builder: RootAPI<C>>(
+//     api: &mut Builder,
+//     a: &[Variable],
+//     b: &[Variable],
+// ) -> [Variable; 32] {
+//     // Han–Carlson adder operates on little-endian bit order
+//     let mut a = a.to_vec();
+//     let mut b = b.to_vec();
+//     a.reverse();
+//     b.reverse();
+
+//     let mut c = vec![api.constant(0); 32];
+//     let mut ci = api.constant(0);
+
+//     for i in 0..8 {
+//         let start = i * 4;
+//         let end = start + 4;
+//         let (sum, ci_next) = han_carlson_adder_4_bits(api, &a[start..end], &b[start..end], ci);
+//         ci = ci_next;
+//         c[start..end].copy_from_slice(&sum);
+//     }
+
+//     c.reverse();
+//     c.try_into().unwrap()
+// }
+
+// === Han–Carlson GF(2) Adder 实现 ===
+pub fn add_hancarlson_32_bits<C: Config, Builder: RootAPI<C>>(
     api: &mut Builder,
-    a: &[Variable], // length = 4
-    b: &[Variable], // length = 4
-    carry_in: Variable,
-) -> ([Variable; 4], Variable) {
-    let mut g = [api.constant(0); 4];
-    let mut p = [api.constant(0); 4];
+    a: &Sha256Word,
+    b: &Sha256Word,
+) -> Sha256Word {
+    let mut a = *a;
+    let mut b = *b;
+    a.reverse();
+    b.reverse();
 
-    // Step 1: Generate and Propagate
+    let mut g = [api.constant(0); 32]; // generate
+    let mut p = [api.constant(0); 32]; // propagate
 
-    for i in 0..4 {
+    // Step 1: compute generate and propagate
+    for i in 0..32 {
         g[i] = api.mul(a[i], b[i]); // g[i] = a[i] & b[i]
         p[i] = api.add(a[i], b[i]); // p[i] = a[i] ^ b[i]
     }
 
-    // Step 2: Prefix tree only on even indices
-    let mut g_prefix = g;
-    let mut p_prefix = p;
+    let mut g_prefix = g.clone();
+    let mut p_prefix = p.clone();
 
-    // round 1: gap = 1, i = 2
-    // g_prefix[2] = g[2] + p[2]*g[1]
-    let p2_and_g1 = api.mul(p[2], g[1]);
-    g_prefix[2] = api.add(g[2], p2_and_g1);
-    // p_prefix[2] = p[2]*p[1]
-    p_prefix[2] = api.mul(p[2], p[1]);
+    // Step 2: prefix tree for even indices
+    let mut gap = 1;
+    while gap < 32 {
+        let mut g_next = g_prefix.clone();
+        let mut p_next = p_prefix.clone();
 
-    // round 2: gap = 2, i = 2
-    // g_prefix[2] = g_prefix[2] + p_prefix[2]*g[0]
-    // p_prefix[2] = p_prefix[2]*p[0]
-    let p2_and_g0 = api.mul(p_prefix[2], g[0]);
-    g_prefix[2] = api.add(g_prefix[2], p2_and_g0);
-    p_prefix[2] = api.mul(p_prefix[2], p[0]);
+        for i in 0..32 {
+            if i >= gap && i % 2 == 0 {
+                let and = api.mul(p_prefix[i], g_prefix[i - gap]);
+                g_next[i] = api.add(g_prefix[i], and);
+                p_next[i] = api.mul(p_prefix[i], p_prefix[i - gap]);
+            }
+        }
 
-    // Step 3: Carry computation
-    let mut carry = [api.constant(0); 5];
-    carry[0] = carry_in;
+        g_prefix = g_next;
+        p_prefix = p_next;
+        gap *= 2;
+    }
 
-    // for i in 1..=4 {
+    // Step 3: carry propagation
+    let mut carry = [api.constant(0); 33];
+    carry[0] = api.constant(0);
+    // for i in 1..=32 {
     //     if (i - 1) % 2 == 0 {
-    //         carry[i] = g_prefix[i - 1]; // even: use prefix
+    //         carry[i] = g_prefix[i - 1]; // even bits from tree
     //     } else {
-    //         let t = api.mul(p[i - 1], carry[i - 1]);
-    //         carry[i] = api.add(g[i - 1], t); // odd: local
+    //         let and = api.mul(p[i - 1], carry[i - 1]);
+    //         carry[i] = api.add(g[i - 1], and); // odd bits from chain
     //     }
     // }
-    carry[1] = g_prefix[0]; // g[0]
-    let p1_and_c1 = api.mul(p[1], carry[1]);
-    carry[2] = api.add(g[1], p1_and_c1); // g[1] + p[1]*carry[1]
-    carry[3] = g_prefix[2]; // g[2]
-    let p3_and_c3 = api.mul(p[3], carry[3]);
-    carry[4] = api.add(g[3], p3_and_c3); // g[3] + p[3]*carry[3]
+    let block_size = 8;
+    for block_start in (1..=32).step_by(block_size) {
+        let block_end = (block_start + block_size - 1).min(32);
+        for i in block_start..=block_end {
+            if (i - 1) % 2 == 0 {
+                carry[i] = g_prefix[i - 1]; // still from tree
+            } else {
+                let and = api.mul(p[i - 1], carry[i - 1]);
+                carry[i] = api.add(g[i - 1], and);
+            }
+        }
+    }
 
-    // Step 4: Final sum
-    let mut sum = [api.constant(0); 4];
-    for i in 0..4 {
+    // Step 4: final sum = p ^ carry
+    let mut sum = [api.constant(0); 32];
+    for i in 0..32 {
         sum[i] = api.add(p[i], carry[i]);
     }
 
-    (sum, carry[4]) // return final carry-out
-}
-
-pub fn add_hancarlson<C: Config, Builder: RootAPI<C>>(
-    api: &mut Builder,
-    a: &[Variable],
-    b: &[Variable],
-) -> [Variable; 32] {
-    // Han–Carlson adder operates on little-endian bit order
-    let mut a = a.to_vec();
-    let mut b = b.to_vec();
-    a.reverse();
-    b.reverse();
-
-    let mut c = vec![api.constant(0); 32];
-    let mut ci = api.constant(0);
-
-    for i in 0..8 {
-        let start = i * 4;
-        let end = start + 4;
-        let (sum, ci_next) = han_carlson_adder_4_bits(api, &a[start..end], &b[start..end], ci);
-        ci = ci_next;
-        c[start..end].copy_from_slice(&sum);
-    }
-
-    c.reverse();
-    c.try_into().unwrap()
+    sum.reverse();
+    sum
 }
 
 pub fn add<C: Config, Builder: RootAPI<C>>(
@@ -651,7 +727,8 @@ pub fn add<C: Config, Builder: RootAPI<C>>(
     // add_brentkung(api, a, b)
     // add_hancarlson(api, a, b)
     // add_koggestone_32_bits(api, a, b)
-    add_koggestone_32_bits_prallel(api, a, b)
+    // add_koggestone_32_bits_prallel(api, a, b)
+    add_hancarlson_32_bits(api, a, b)
 }
 
 // Goal: Return sums of a list of u32 using GF(2) full addition with carry
